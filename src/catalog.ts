@@ -55,6 +55,14 @@ export class Catalog {
     }
   }
 
+  /** Projects ordered by recent thread activity, then the rest. */
+  async recentProjects(): Promise<{ id: string; name: string }[]> {
+    const [projects, threads] = await Promise.all([this.projects(), this.#sdk.threads.list({ archived: false, limit: 100 }).catch(() => [])]);
+    const order = new Map<string, number>();
+    for (const thread of [...threads].sort((a, b) => b.updatedAt - a.updatedAt)) if (!order.has(thread.projectId)) order.set(thread.projectId, order.size);
+    return [...projects].sort((a, b) => (order.get(a.id) ?? Number.MAX_SAFE_INTEGER) - (order.get(b.id) ?? Number.MAX_SAFE_INTEGER));
+  }
+
   /** Recent visible top-level threads, newest first, for the mirror picker. */
   async recentThreads(exclude: ReadonlySet<string>): Promise<{ id: string; title: string; projectName: string }[]> {
     const threads = await this.#sdk.threads.list({ archived: false, hasParent: false, limit: 100 });

@@ -101,8 +101,14 @@ export class Outbox {
       .catch((error: unknown) => this.#log.warn(`ephemeral message failed: ${String(error)}`));
   }
 
-  async openModal(triggerId: string, view: ModalView): Promise<void> {
-    await this.slack.call("views.open", { trigger_id: triggerId, view });
+  /** Open a modal; returns its view id for later updates. The trigger expires 3 seconds after the tap. */
+  async openModal(triggerId: string, view: ModalView): Promise<string | undefined> {
+    const result = await this.slack.call<SlackResponse & { view?: { id?: string } }>("views.open", { trigger_id: triggerId, view });
+    return result.view?.id;
+  }
+
+  async updateModal(viewId: string, view: ModalView): Promise<void> {
+    await this.slack.call("views.update", { view_id: viewId, view });
   }
 
   async publishHome(userId: string, view: HomeView): Promise<void> {

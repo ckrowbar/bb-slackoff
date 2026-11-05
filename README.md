@@ -11,7 +11,7 @@ Slackoff is a [BB](https://getbb.app) plugin that lets you follow and steer agen
 - **Replying.** Reply in the thread to message the agent. While it works, your reply steers the turn or queues behind it. Slack formatting, including code blocks, lists and links, is converted back to Markdown. Images and files are attached. Voice memos are transcribed with BB's voice service, and Slackoff shows you what it heard.
 - **Reactions show progress.** 👀 means the agent has your message, ⏳ means it is queued, and ✅, ⚠️ or ⏹ show how the turn ended.
 - **Status line.** While the agent works, Slackoff shows "Slackoff is running …" under the thread where Slack supports it.
-- **New threads.** Send the app a direct message to start a BB thread. Slackoff uses the default project, else the last one you used, else asks you to choose. The **Home** tab lists mirrored threads and has New thread and Mirror a thread.
+- **New threads.** Send the app a direct message with the task. Slackoff starts a BB thread in the default project, or the last one you used. Otherwise it replies with one-tap buttons for your most recent projects. The **Home** tab lists mirrored threads and has New thread and Mirror a thread.
 - **Text commands.** Reply `!help` to list them: `!stop`, `!model <id>`, `!effort <level>`, `!compact`, `!status` and `!close`.
 
 ## In BB

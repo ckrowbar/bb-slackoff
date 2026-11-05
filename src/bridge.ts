@@ -9,7 +9,7 @@ import { z } from "zod";
 
 import { errorText, isNotFound, threadLink, threadTitle, type InteractionResolution, type PromptInput, type ReasoningLevel, type Sdk, type ThreadResponse } from "./bb.ts";
 import { ACTION, MORE, VIEW, notification, type CardStatus } from "./blocks/common.ts";
-import { MIRROR_FIELDS, NEW_THREAD_FIELDS, buildHomeView, buildMirrorModal, buildNewThreadModal } from "./blocks/home.ts";
+import { MIRROR_FIELDS, NEW_THREAD_FIELDS, buildHomeView, buildLoadingModal, buildMirrorModal, buildNewThreadModal, buildProjectChooser } from "./blocks/home.ts";
 import { buildAnswerModal, type ApprovalDecision } from "./blocks/interaction-cards.ts";
 import { buildThreadCard, type LastTurn, type ThreadCardState } from "./blocks/thread-card.ts";
 import { Catalog } from "./catalog.ts";
@@ -31,7 +31,8 @@ import {
 import type { Preferences } from "./settings.ts";
 import type { Log, Outbox } from "./slack/outbox.ts";
 import type { SocketEnvelope } from "./slack/socket-mode.ts";
-import type { RichTextInline, SlackMessage } from "./slack/types.ts";
+import { SlackApiError } from "./slack/api.ts";
+import type { ModalView, RichTextInline, SlackMessage } from "./slack/types.ts";
 import type { Binding, Store } from "./store.ts";
 import { TRACKED_EVENT_TYPES, TurnTracker, type Effect, type Row } from "./turn.ts";
 
@@ -86,6 +87,10 @@ const MAX_PAGES_PER_SYNC = 20;
 /** A restart replays the whole turn in progress; allow long ones. */
 const MAX_HYDRATE_PAGES = 200;
 const DEFAULT_CARD_INTERVAL_MS = 3_000;
+/** Projects offered as one-tap buttons before "Other…". */
+const PROJECT_BUTTONS = 4;
+/** Open the finished form directly if it is ready this fast; otherwise show a loading form first. */
+const FORM_READY_MS = 300;
 const RETRY_DELAYS_MS = [5_000, 15_000, 60_000, 300_000];
 
 const MessageEventSchema = z.object({
@@ -115,6 +120,7 @@ const ActionPayloadSchema = z.object({
       block_id: z.string().optional(),
       value: z.string().optional(),
       selected_option: z.object({ value: z.string() }).nullish(),
+      action_ts: z.string().optional(),
     }),
   ),
 });
@@ -763,16 +769,28 @@ export class Bridge {
       return;
     }
     this.#pendingPrompts.set(message.ts, { text, files: message.files });
+    const projects = await this.#catalog.recentProjects();
     await this.#o.outbox.post(
       { channel: message.channel, threadTs: message.ts },
-      {
-        text: "Choose a project for this thread",
-        blocks: [
-          { type: "section", text: { type: "mrkdwn", text: "Which project should this thread run in? Set a default project in Slackoff's settings to skip this." } },
-          { type: "actions", elements: [{ type: "button", action_id: ACTION.newThread, text: { type: "plain_text", text: "Choose project" }, value: `${message.channel}|${message.ts}`, style: "primary" }] },
-        ],
-      },
+      buildProjectChooser({ projects: projects.slice(0, PROJECT_BUTTONS), origin: `${message.channel}|${message.ts}`, more: projects.length > PROJECT_BUTTONS }),
     );
+  }
+
+  /** A project button under a DM: start the thread there. */
+  async #pickProject(value: string, payload: ActionPayload): Promise<void> {
+    const [channelId = "", ts = "", projectId = ""] = value.split("|");
+    const pending = this.#pendingPrompts.get(ts);
+    const chooserTs = payload.container?.message_ts;
+    if (!pending) {
+      await this.#o.outbox.ephemeral(channelId, this.#prefs.userId, "That request expired. Send your message again to start a thread.", ts);
+      return;
+    }
+    this.#pendingPrompts.delete(ts);
+    const project = (await this.#catalog.projects()).find((candidate) => candidate.id === projectId);
+    if (chooserTs) {
+      await this.#o.outbox.update(channelId, chooserTs, { text: "Starting the thread", blocks: [{ type: "context", elements: [{ type: "mrkdwn", text: `Starting in *${escapeMrkdwn(project?.name ?? projectId)}*…` }] }] });
+    }
+    await this.#spawn(projectId, pending.text, pending.files, { channelId, ts });
   }
 
   async #defaultProject(): Promise<string | undefined> {
@@ -863,6 +881,7 @@ export class Bridge {
     const action = payload.actions[0];
     if (!action) return;
     const value = action.value ?? "";
+    this.#logTapDelay(action.action_ts);
     const cardThread = action.block_id?.startsWith("ctl:") ? action.block_id.slice(4) : value;
     // Buttons that share a block carry a unique suffix: "slackoff_approve:deny".
     switch (action.action_id.split(":")[0]) {
@@ -915,30 +934,68 @@ export class Bridge {
       }
       case ACTION.answerModal: {
         const [threadId = "", interactionId = ""] = value.split("|");
+        if (!payload.trigger_id) return;
         const interaction = (await this.#o.sdk.threads.interactions.get({ threadId, interactionId })) as PendingInteraction;
-        if (interaction.status !== "pending" || !payload.trigger_id) return;
-        await this.#o.outbox.openModal(payload.trigger_id, buildAnswerModal(threadId, interactionId, questionsOf(interaction)));
+        if (interaction.status !== "pending") return;
+        await this.#openForm(payload, "Answer the agent", async () => buildAnswerModal(threadId, interactionId, questionsOf(interaction)));
         return;
       }
+      case ACTION.pickProject:
+        await this.#pickProject(value, payload);
+        return;
       case ACTION.newThread: {
-        if (!payload.trigger_id) return;
         const origin = value.includes("|") ? value : undefined;
         const pending = origin ? this.#pendingPrompts.get(origin.split("|")[1] ?? "") : undefined;
-        const modal = buildNewThreadModal({
-          projects: await this.#catalog.projects(),
-          projectId: prefs.defaultProjectId ?? (await this.#o.store.lastProjectId()),
-          ...(pending?.text ? { prompt: pending.text } : {}),
-          ...(origin ? { origin } : {}),
-        });
-        await this.#o.outbox.openModal(payload.trigger_id, modal);
+        await this.#openForm(payload, "New BB thread", async () =>
+          buildNewThreadModal({
+            projects: await this.#catalog.recentProjects(),
+            projectId: prefs.defaultProjectId ?? (await this.#o.store.lastProjectId()),
+            ...(pending?.text ? { prompt: pending.text } : {}),
+            ...(origin ? { origin } : {}),
+          }),
+        );
         return;
       }
-      case ACTION.mirrorThread: {
-        if (!payload.trigger_id) return;
-        await this.#o.outbox.openModal(payload.trigger_id, buildMirrorModal(await this.#catalog.recentThreads(this.#mirrored)));
+      case ACTION.mirrorThread:
+        await this.#openForm(payload, "Mirror a thread", async () => buildMirrorModal(await this.#catalog.recentThreads(this.#mirrored)));
         return;
-      }
     }
+  }
+
+  /**
+   * Open a form. Slack accepts a form only within 3 seconds of the tap, so a
+   * form that is not ready at once opens as "Loading…" and fills in after.
+   */
+  async #openForm(payload: ActionPayload, title: string, build: () => Promise<ModalView>): Promise<void> {
+    if (!payload.trigger_id) return;
+    const built = build();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const ready = await Promise.race([built, new Promise<undefined>((resolve) => (timer = setTimeout(() => resolve(undefined), FORM_READY_MS)))]);
+    clearTimeout(timer);
+    try {
+      if (ready) {
+        await this.#o.outbox.openModal(payload.trigger_id, ready);
+        return;
+      }
+      const viewId = await this.#o.outbox.openModal(payload.trigger_id, buildLoadingModal(title));
+      const view = await built;
+      if (viewId) await this.#o.outbox.updateModal(viewId, view);
+    } catch (error) {
+      if (!(error instanceof SlackApiError) || error.code !== "expired_trigger_id") throw error;
+      // The tap reached Slackoff too late for Slack to open a form; say so instead of failing silently.
+      this.#o.log.warn(`Slack's form window had closed before Slackoff got the tap ("${title}")`);
+      const hint = "Slack took too long to deliver that tap, so the form could not open. Try again, or send me a message to start a thread.";
+      if (payload.channel) await this.#o.outbox.ephemeral(payload.channel.id, payload.user.id, hint, payload.container?.thread_ts);
+      else this.#notice(hint);
+    }
+  }
+
+  /** Slack's forms need the tap within 3 seconds; note slow deliveries so setups can be diagnosed. */
+  #logTapDelay(actionTs: string | undefined): void {
+    const at = Number.parseFloat(actionTs ?? "");
+    if (!Number.isFinite(at)) return;
+    const delay = this.#now - at * 1000;
+    if (delay > 1_500) this.#o.log.warn(`Slack delivered a tap ${Math.round(delay)} ms after it happened`);
   }
 
   async #showInBb(threadId: string, payload: ActionPayload): Promise<void> {

@@ -40,6 +40,8 @@ export interface Call {
 export class FakeSlack implements SlackClient {
   readonly calls: Call[] = [];
   reject: ((method: string, body: Record<string, unknown>) => string | undefined) | undefined;
+  /** Extra fields to merge into a successful response. */
+  respond: ((method: string, body: Record<string, unknown>) => Record<string, unknown> | undefined) | undefined;
   #ts = 100;
 
   async call<T extends SlackResponse>(method: string, body: Record<string, unknown> = {}): Promise<T> {
@@ -51,6 +53,8 @@ export class FakeSlack implements SlackClient {
       call.ts = `${(this.#ts += 1)}.000`;
       return { ok: true, channel: DM, ts: call.ts } as unknown as T;
     }
+    const extra = this.respond?.(method, body);
+    if (extra) return { ok: true, ...extra } as unknown as T;
     if (method === "chat.getPermalink") return { ok: true, permalink: `https://slack.test/${String(body.message_ts)}` } as unknown as T;
     return { ok: true } as unknown as T;
   }

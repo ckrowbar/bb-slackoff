@@ -263,17 +263,62 @@ test("a top-level DM starts a thread and remembers the project", async () => {
   assert.equal(await store.lastProjectId(), PROJECT);
 });
 
-test("a top-level DM with no known project asks for one", async () => {
-  const { bridge, slack, harness, settle } = setup();
+test("a top-level DM with no known project offers one-tap project buttons", async () => {
+  const { bridge, slack, harness, store, settle } = setup();
   harness.stub("projects.list", async () => [
-    { id: "proj_a", name: "a", kind: "standard" },
-    { id: "proj_b", name: "b", kind: "standard" },
+    { id: "proj_a", name: "alpha", kind: "standard" },
+    { id: "proj_b", name: "beta", kind: "standard" },
   ]);
+  harness.stub("threads.list", async () => [{ id: "thr_x", projectId: "proj_b", updatedAt: 5 }]);
   bridge.handleEnvelope(message("Do the thing"));
   await settle();
   assert.equal(harness.callsTo("threads.spawn").length, 0);
-  assert.match(json(slack.posts()[0]?.body.blocks), /Choose project/);
-  assert.equal(slack.posts()[0]?.body.channel, DM);
+  const chooser = slack.posts()[0]!;
+  assert.equal(chooser.body.channel, DM);
+  assert.equal(chooser.body.thread_ts, "200.000");
+  const buttons = (chooser.body.blocks as { type: string; elements?: { text: { text: string }; value: string; action_id: string }[] }[]).find((block) => block.type === "actions")!.elements!;
+  assert.deepEqual(
+    buttons.map((button) => button.text.text),
+    ["beta", "alpha"],
+    "the most recently used project comes first",
+  );
+
+  bridge.handleEnvelope(action(buttons[1]!.action_id, buttons[1]!.value, {}));
+  await settle();
+  const spawn = harness.callsTo("threads.spawn")[0]?.[0] as { projectId: string; input: unknown[] };
+  assert.equal(spawn.projectId, "proj_a");
+  assert.deepEqual(spawn.input, [{ type: "text", text: "Do the thing", mentions: [] }]);
+  assert.equal((await store.get("thr_new"))?.rootTs, "200.000");
+  assert.equal(await store.lastProjectId(), "proj_a");
+});
+
+test("a form that is slow to build opens as Loading and fills in", async () => {
+  const { bridge, slack, harness, settle } = setup();
+  harness.stub("projects.list", async () => {
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    return [{ id: PROJECT, name: "parser", kind: "standard" }];
+  });
+  slack.respond = (method) => (method === "views.open" ? { view: { id: "V1" } } : undefined);
+  bridge.handleEnvelope({ type: "interactive", envelope_id: "e", payload: { type: "block_actions", user: { id: USER }, trigger_id: "T1", actions: [{ action_id: ACTION.newThread, value: "home" }] } });
+  await settle();
+  await new Promise((resolve) => setTimeout(resolve, 450));
+  await settle();
+  assert.match(json(slack.of("views.open")[0]?.body.view), /Loading/);
+  assert.equal(slack.of("views.update")[0]?.body.view_id, "V1");
+  assert.match(json(slack.of("views.update")[0]?.body.view), /What should the agent do/);
+});
+
+test("a tap that arrives too late for a form explains itself", async () => {
+  const { bridge, slack, settle, logs } = setup();
+  slack.reject = (method) => (method === "views.open" ? "expired_trigger_id" : undefined);
+  bridge.handleEnvelope({
+    type: "interactive",
+    envelope_id: "e",
+    payload: { type: "block_actions", user: { id: USER }, trigger_id: "T1", channel: { id: DM }, actions: [{ action_id: ACTION.newThread, value: "home", action_ts: String(Date.now() / 1000 - 5) }] },
+  });
+  await settle();
+  assert.match(String(slack.of("chat.postEphemeral")[0]?.body.text), /took too long/);
+  assert.ok(logs.some((line) => /delivered a tap \d+ ms after/.test(line)));
 });
 
 test("rejected rich blocks fall back to mrkdwn", async () => {

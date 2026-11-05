@@ -42,6 +42,28 @@ export function buildHomeView(input: { threads: readonly HomeThread[]; notice?: 
   return { type: "home", blocks: blocks.slice(0, 100) };
 }
 
+/** Shown at once while the real form loads, so Slack's 3-second window to open a form is never missed. */
+export function buildLoadingModal(title: string): ModalView {
+  return { type: "modal", callback_id: "slackoff_loading", title: plain(title, 24), close: plain("Cancel", 24), blocks: [context("Loading…")] };
+}
+
+/**
+ * Asks which project a DM-started thread should run in. Buttons need no
+ * form, so one tap works on a phone; "Other…" opens the full picker.
+ */
+export function buildProjectChooser(input: { projects: readonly { id: string; name: string }[]; origin: string; more: boolean }): { text: string; blocks: KnownBlock[] } {
+  const buttons = input.projects.map((project, index) => button(`${ACTION.pickProject}:${index}`, project.name, `${input.origin}|${project.id}`, index === 0 ? "primary" : undefined));
+  if (input.more) buttons.push(button(ACTION.newThread, "Other…", input.origin));
+  return {
+    text: "Which project should this thread run in?",
+    blocks: [
+      section("Which project should this run in?"),
+      { type: "actions", elements: buttons.slice(0, 25) },
+      context("Set a default project in Slackoff's settings to skip this."),
+    ],
+  };
+}
+
 export function buildNewThreadModal(input: {
   projects: readonly { id: string; name: string }[];
   projectId: string | undefined;

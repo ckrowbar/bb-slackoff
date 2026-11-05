@@ -19,6 +19,8 @@ export const ACTION = {
   open: "slackoff_open",
   link: "slackoff_link",
   newThread: "slackoff_new_thread",
+  /** One-tap project choice for a thread started by a DM: `slackoff_pick_project:<index>`. */
+  pickProject: "slackoff_pick_project",
   mirrorThread: "slackoff_mirror_thread",
 } as const;
 

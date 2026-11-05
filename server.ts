@@ -123,6 +123,7 @@ export default async function plugin(bb: BbPluginApi) {
           log: bb.log,
           onConnectionChange: (up) => {
             if (up) {
+              if (connection.state !== "connected") bb.log.info(`Connected to Slack${connection.team ? ` (${connection.team})` : ""}`);
               setConnection({ state: "connected", error: null });
               void current.reconcileAll().catch((error) => bb.log.error(`reconcile failed: ${errorText(error)}`));
             } else if (connection.state === "connected") {
