@@ -154,6 +154,12 @@ export function setup(options: SetupOptions = {}) {
         }),
       },
       system: { transcribeVoice: async () => ({ text: "please run the tests" }) },
+      threadSections: {
+        list: async () => [
+          { id: "sec_reviews", name: "reviews" },
+          { id: "sec_misc", name: "misc" },
+        ],
+      },
     } as never,
   });
   const slack = options.slack ?? new FakeSlack();

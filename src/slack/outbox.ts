@@ -37,6 +37,7 @@ export class Outbox {
   readonly slack: SlackClient;
   readonly #log: Log;
   readonly #permalinks = new Map<string, string>();
+  readonly #permalinkErrors = new Set<string>();
   readonly #status = new Map<string, { text: string; at: number }>();
   #statusSupported = true;
 
@@ -123,9 +124,24 @@ export class Outbox {
       const result = await this.slack.call<SlackResponse & { permalink?: string }>("chat.getPermalink", { channel, message_ts: ts });
       if (result.permalink) this.#permalinks.set(key, result.permalink);
       return result.permalink;
-    } catch {
+    } catch (error) {
+      const reason = error instanceof SlackApiError ? error.code : String(error);
+      if (!this.#permalinkErrors.has(reason)) {
+        this.#permalinkErrors.add(reason);
+        this.#log.warn(`could not get a Slack link: ${reason}`);
+      }
       return undefined;
     }
+  }
+
+  /** A link that opens the thread view, not just its first message. */
+  async threadPermalink(channel: string, rootTs: string): Promise<string | undefined> {
+    const permalink = await this.permalink(channel, rootTs);
+    if (!permalink) return undefined;
+    const url = new URL(permalink);
+    url.searchParams.set("thread_ts", rootTs);
+    url.searchParams.set("cid", channel);
+    return url.toString();
   }
 
   /**

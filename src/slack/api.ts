@@ -50,11 +50,8 @@ export class SlackApi {
     for (let attempt = 0; ; attempt += 1) {
       const response = await this.#fetch(`${this.#baseUrl}/${method}`, {
         method: "POST",
-        headers: {
-          authorization: `Bearer ${this.#token}`,
-          "content-type": "application/json; charset=utf-8",
-        },
-        body: JSON.stringify(body),
+        headers: { authorization: `Bearer ${this.#token}` },
+        body: formBody(body),
       });
       if (response.status === 429 && attempt < this.#maxRetries) {
         const seconds = Number.parseInt(response.headers.get("retry-after") ?? "1", 10);
@@ -108,6 +105,20 @@ export class SlackApi {
     }
     return bytes;
   }
+}
+
+/**
+ * Form-encode a call. Every Web API method accepts form bodies, while some
+ * (chat.getPermalink, for one) reject JSON; objects such as blocks travel as
+ * JSON strings, as Slack's own SDK sends them.
+ */
+export function formBody(body: Record<string, unknown>): URLSearchParams {
+  const form = new URLSearchParams();
+  for (const [key, value] of Object.entries(body)) {
+    if (value === undefined || value === null) continue;
+    form.set(key, typeof value === "string" ? value : typeof value === "number" || typeof value === "boolean" ? String(value) : JSON.stringify(value));
+  }
+  return form;
 }
 
 /** Slack serves user uploads only from these hosts. */

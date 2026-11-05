@@ -9,6 +9,10 @@ import type { ButtonElement, KnownBlock, Option, PlainText, StaticSelectElement 
  */
 export const ACTION = {
   model: "slackoff_model",
+  /** Status card: move the thread to another BB sidebar section. */
+  section: "slackoff_section",
+  /** Project chooser: the section a DM-started thread goes in. */
+  pickSection: "slackoff_pick_section",
   effort: "slackoff_effort",
   stop: "slackoff_stop",
   more: "slackoff_more",
@@ -23,6 +27,9 @@ export const ACTION = {
   pickProject: "slackoff_pick_project",
   mirrorThread: "slackoff_mirror_thread",
 } as const;
+
+/** Option value for "no sidebar section". */
+export const NO_SECTION = "none";
 
 /** Values of the status card's overflow menu. */
 export const MORE = {

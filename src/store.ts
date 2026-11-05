@@ -3,6 +3,7 @@
 // binding:<threadId>          → Binding
 // slack:<channelId>:<rootTs>  → threadId (reverse lookup for replies)
 // state:lastProjectId         → project used for the last thread started from Slack
+// state:lastSectionId         → sidebar section used for the last thread started or moved from Slack
 import { z } from "zod";
 
 const CardSchema = z.object({
@@ -47,6 +48,7 @@ const BINDING_PREFIX = "binding:";
 const bindingKey = (threadId: string) => `${BINDING_PREFIX}${threadId}`;
 const slackKey = (channelId: string, rootTs: string) => `slack:${channelId}:${rootTs}`;
 const LAST_PROJECT_KEY = "state:lastProjectId";
+const LAST_SECTION_KEY = "state:lastSectionId";
 
 export class Store {
   readonly #kv: KvStore;
@@ -89,5 +91,16 @@ export class Store {
 
   async setLastProjectId(projectId: string): Promise<void> {
     await this.#kv.set(LAST_PROJECT_KEY, projectId);
+  }
+
+  /** Sidebar section for the last thread started or moved from Slack; null means no section. */
+  async lastSectionId(): Promise<string | null> {
+    const value = await this.#kv.get<unknown>(LAST_SECTION_KEY);
+    return typeof value === "string" ? value : null;
+  }
+
+  async setLastSectionId(sectionId: string | null): Promise<void> {
+    if (sectionId) await this.#kv.set(LAST_SECTION_KEY, sectionId);
+    else await this.#kv.delete(LAST_SECTION_KEY);
   }
 }

@@ -8,7 +8,7 @@
 import { z } from "zod";
 
 import { errorText, isNotFound, threadLink, threadTitle, type InteractionResolution, type PromptInput, type ReasoningLevel, type Sdk, type ThreadResponse } from "./bb.ts";
-import { ACTION, MORE, VIEW, notification, type CardStatus } from "./blocks/common.ts";
+import { ACTION, MORE, NO_SECTION, VIEW, notification, type CardStatus } from "./blocks/common.ts";
 import { MIRROR_FIELDS, NEW_THREAD_FIELDS, buildHomeView, buildLoadingModal, buildMirrorModal, buildNewThreadModal, buildProjectChooser } from "./blocks/home.ts";
 import { buildAnswerModal, type ApprovalDecision } from "./blocks/interaction-cards.ts";
 import { buildThreadCard, type LastTurn, type ThreadCardState } from "./blocks/thread-card.ts";
@@ -146,7 +146,8 @@ export class Bridge {
   readonly #background = new Set<Promise<void>>();
   readonly #mirrored = new Set<string>();
   readonly #seenEvents = new Map<string, number>();
-  readonly #pendingPrompts = new Map<string, { text: string; files: SlackFile[] }>();
+  /** DMs waiting for a project choice, by message ts. */
+  readonly #pendingPrompts = new Map<string, { text: string; files: SlackFile[]; sectionId: string | null }>();
   readonly #titles = new Map<string, string>();
   #homeTimer: ReturnType<typeof setTimeout> | undefined;
   #homeNotice: string | undefined;
@@ -316,7 +317,7 @@ export class Bridge {
   async threadState(threadId: string): Promise<{ mirrored: boolean; permalink: string | null }> {
     const binding = await this.#o.store.get(threadId);
     if (!binding?.mirrored) return { mirrored: false, permalink: null };
-    return { mirrored: true, permalink: (await this.#o.outbox.permalink(binding.channelId, binding.rootTs)) ?? null };
+    return { mirrored: true, permalink: (await this.#o.outbox.threadPermalink(binding.channelId, binding.rootTs)) ?? null };
   }
 
   /** Mirrored threads for the BB sidebar and Slack App Home, most recently active first. */
@@ -332,7 +333,7 @@ export class Bridge {
           projectName: thread ? (await this.#catalog.project(thread.projectId)).name : "",
           status,
           activity,
-          permalink: (await this.#o.outbox.permalink(binding.channelId, binding.rootTs)) ?? null,
+          permalink: (await this.#o.outbox.threadPermalink(binding.channelId, binding.rootTs)) ?? null,
           updatedAt: thread?.updatedAt ?? 0,
         };
       }),
@@ -764,15 +765,23 @@ export class Bridge {
   async #startFromDm(message: MessageEvent, text: string): Promise<void> {
     if (!text && message.files.length === 0) return;
     const projectId = await this.#defaultProject();
+    const sectionId = await this.#lastSection();
     if (projectId) {
-      await this.#spawn(projectId, text, message.files, { channelId: message.channel, ts: message.ts });
+      // The status card's Section menu moves the thread if the last section is not right.
+      await this.#spawn(projectId, text, message.files, { channelId: message.channel, ts: message.ts }, sectionId);
       return;
     }
-    this.#pendingPrompts.set(message.ts, { text, files: message.files });
-    const projects = await this.#catalog.recentProjects();
+    this.#pendingPrompts.set(message.ts, { text, files: message.files, sectionId });
+    const [projects, sections] = await Promise.all([this.#catalog.recentProjects(), this.#catalog.sections()]);
     await this.#o.outbox.post(
       { channel: message.channel, threadTs: message.ts },
-      buildProjectChooser({ projects: projects.slice(0, PROJECT_BUTTONS), origin: `${message.channel}|${message.ts}`, more: projects.length > PROJECT_BUTTONS }),
+      buildProjectChooser({
+        projects: projects.slice(0, PROJECT_BUTTONS),
+        origin: `${message.channel}|${message.ts}`,
+        more: projects.length > PROJECT_BUTTONS,
+        sections,
+        sectionId,
+      }),
     );
   }
 
@@ -790,7 +799,14 @@ export class Bridge {
     if (chooserTs) {
       await this.#o.outbox.update(channelId, chooserTs, { text: "Starting the thread", blocks: [{ type: "context", elements: [{ type: "mrkdwn", text: `Starting in *${escapeMrkdwn(project?.name ?? projectId)}*…` }] }] });
     }
-    await this.#spawn(projectId, pending.text, pending.files, { channelId, ts });
+    await this.#spawn(projectId, pending.text, pending.files, { channelId, ts }, pending.sectionId);
+  }
+
+  /** The sidebar section used last, if it still exists. */
+  async #lastSection(): Promise<string | null> {
+    const sectionId = await this.#o.store.lastSectionId();
+    if (!sectionId) return null;
+    return (await this.#catalog.sections()).some((candidate) => candidate.id === sectionId) ? sectionId : null;
   }
 
   async #defaultProject(): Promise<string | undefined> {
@@ -799,12 +815,13 @@ export class Bridge {
     return known(this.#prefs.defaultProjectId) ?? known(await this.#o.store.lastProjectId()) ?? (projects.length === 1 ? projects[0]?.id : undefined);
   }
 
-  async #spawn(projectId: string, text: string, files: readonly SlackFile[], root?: { channelId: string; ts: string }): Promise<Binding> {
+  async #spawn(projectId: string, text: string, files: readonly SlackFile[], root?: { channelId: string; ts: string }, sectionId: string | null = null): Promise<Binding> {
     const place = root ? { channelId: root.channelId, rootTs: root.ts } : { channelId: this.#prefs.userId, rootTs: "" };
     const prompt = await this.#prompt(place, projectId, text, { files: [...files], channel: place.channelId });
     if (!prompt) throw new Error("The message had nothing to send");
-    const thread = await this.#o.sdk.threads.spawn({ projectId, environment: { type: "project-default" }, input: prompt.input });
+    const thread = await this.#o.sdk.threads.spawn({ projectId, environment: { type: "project-default" }, input: prompt.input, ...(sectionId ? { sectionId } : {}) });
     await this.#o.store.setLastProjectId(projectId);
+    await this.#o.store.setLastSectionId(sectionId);
     const runtime = this.#runtime(thread.id);
     // A prompt typed in Slack is already visible there; one from the form is not.
     if (root) this.#rememberEcho(runtime, prompt.text);
@@ -943,6 +960,23 @@ export class Bridge {
       case ACTION.pickProject:
         await this.#pickProject(value, payload);
         return;
+      case ACTION.pickSection: {
+        // Remember the choice for the DM; tapping a project starts the thread.
+        const origin = action.block_id?.startsWith("origin:") ? action.block_id.slice(7) : "";
+        const pending = this.#pendingPrompts.get(origin.split("|")[1] ?? "");
+        const selected = action.selected_option?.value;
+        if (pending && selected) pending.sectionId = selected === NO_SECTION ? null : selected;
+        return;
+      }
+      case ACTION.section: {
+        const selected = action.selected_option?.value;
+        if (!selected || !cardThread) return;
+        const sectionId = selected === NO_SECTION ? null : selected;
+        await this.#o.sdk.threads.update({ threadId: cardThread, sectionId });
+        await this.#o.store.setLastSectionId(sectionId);
+        this.#scheduleCard(cardThread, true);
+        return;
+      }
       case ACTION.newThread: {
         const origin = value.includes("|") ? value : undefined;
         const pending = origin ? this.#pendingPrompts.get(origin.split("|")[1] ?? "") : undefined;
@@ -950,6 +984,8 @@ export class Bridge {
           buildNewThreadModal({
             projects: await this.#catalog.recentProjects(),
             projectId: prefs.defaultProjectId ?? (await this.#o.store.lastProjectId()),
+            sections: await this.#catalog.sections(),
+            sectionId: pending ? pending.sectionId : await this.#lastSection(),
             ...(pending?.text ? { prompt: pending.text } : {}),
             ...(origin ? { origin } : {}),
           }),
@@ -1014,6 +1050,8 @@ export class Bridge {
     if (view.callback_id === VIEW.newThread) {
       const projectId = values[NEW_THREAD_FIELDS.projectBlock]?.[NEW_THREAD_FIELDS.projectInput]?.selected_option?.value as string | undefined;
       const prompt = (values[NEW_THREAD_FIELDS.promptBlock]?.[NEW_THREAD_FIELDS.promptInput]?.value as string | undefined)?.trim() ?? "";
+      const chosenSection = values[NEW_THREAD_FIELDS.sectionBlock]?.[NEW_THREAD_FIELDS.sectionInput]?.selected_option?.value as string | undefined;
+      const sectionId = chosenSection && chosenSection !== NO_SECTION ? chosenSection : null;
       if (!projectId) return { response_action: "errors", errors: { [NEW_THREAD_FIELDS.projectBlock]: "Choose a project." } };
       if (!prompt) return { response_action: "errors", errors: { [NEW_THREAD_FIELDS.promptBlock]: "Tell the agent what to do." } };
       const [channelId, ts] = view.private_metadata.split("|");
@@ -1021,7 +1059,7 @@ export class Bridge {
       const files = ts ? (this.#pendingPrompts.get(ts)?.files ?? []) : [];
       if (ts) this.#pendingPrompts.delete(ts);
       this.#track(
-        this.#spawn(projectId, prompt, files, root).then(
+        this.#spawn(projectId, prompt, files, root, sectionId).then(
           () => this.#notice("Started a new BB thread. Find it in the Messages tab."),
           (error: unknown) => this.#notice(`Could not start the thread: ${errorText(error)}`),
         ),
@@ -1166,6 +1204,7 @@ export class Bridge {
     const runtime = this.#runtime(thread.id);
     const project = await this.#catalog.project(thread.projectId);
     const catalog = await this.#catalog.models(thread);
+    const sections = await this.#catalog.sections();
     const options = await this.#o.sdk.threads.defaultExecutionOptions({ threadId: thread.id }).catch(() => null);
     const modelId = runtime.override.model ?? options?.model;
     const current = catalog.find((entry) => entry.model === modelId);
@@ -1181,6 +1220,8 @@ export class Bridge {
       effort: runtime.override.effort ?? options?.reasoningLevel,
       models: catalog.map((entry) => ({ id: entry.model, name: entry.displayName })),
       efforts: current?.supportedReasoningEfforts.map((level) => level.reasoningEffort) ?? [],
+      sections,
+      sectionId: thread.sectionId,
       progress: turn
         ? { startedAt: turn.startedAt, now: Math.max(turn.lastAt, this.#now), steps: turn.steps, plan: turn.plan, update: turn.update, showSteps: prefs.showActivity }
         : undefined,

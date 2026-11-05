@@ -1,11 +1,13 @@
 // App Home and the start/mirror modals.
 import { escapeMrkdwn, truncate } from "../format/mrkdwn.ts";
 import type { HomeView, KnownBlock, ModalView } from "../slack/types.ts";
-import { ACTION, VIEW, button, context, option, plain, section, statusText, type CardStatus } from "./common.ts";
+import { ACTION, NO_SECTION, VIEW, button, context, option, plain, section, select, statusText, type CardStatus } from "./common.ts";
 
 export const NEW_THREAD_FIELDS = {
   projectBlock: "project",
   projectInput: "project_input",
+  sectionBlock: "section",
+  sectionInput: "section_input",
   promptBlock: "prompt",
   promptInput: "prompt_input",
 } as const;
@@ -37,7 +39,10 @@ export function buildHomeView(input: { threads: readonly HomeThread[]; notice?: 
   for (const thread of input.threads.slice(0, 40)) {
     const title = escapeMrkdwn(truncate(thread.title, 150));
     const link = thread.permalink ? `*<${thread.permalink}|${title}>*` : `*${title}*`;
-    blocks.push(section(`${link}\n${escapeMrkdwn(truncate(statusText(thread.status, thread.activity), 200))} · ${escapeMrkdwn(thread.projectName)}`));
+    const text = `${link}\n${escapeMrkdwn(truncate(statusText(thread.status, thread.activity), 200))} · ${escapeMrkdwn(thread.projectName)}`;
+    // A button is an easier target than a link on a phone.
+    const open = thread.permalink ? { type: "button" as const, action_id: `${ACTION.link}:${blocks.length}`, text: plain("Open"), url: thread.permalink } : undefined;
+    blocks.push({ type: "section", text: { type: "mrkdwn", text: truncate(text, 3_000) }, ...(open ? { accessory: open } : {}) });
   }
   return { type: "home", blocks: blocks.slice(0, 100) };
 }
@@ -51,22 +56,35 @@ export function buildLoadingModal(title: string): ModalView {
  * Asks which project a DM-started thread should run in. Buttons need no
  * form, so one tap works on a phone; "Other…" opens the full picker.
  */
-export function buildProjectChooser(input: { projects: readonly { id: string; name: string }[]; origin: string; more: boolean }): { text: string; blocks: KnownBlock[] } {
+export function buildProjectChooser(input: {
+  projects: readonly { id: string; name: string }[];
+  origin: string;
+  more: boolean;
+  sections: readonly { id: string; name: string }[];
+  sectionId: string | null;
+}): { text: string; blocks: KnownBlock[] } {
   const buttons = input.projects.map((project, index) => button(`${ACTION.pickProject}:${index}`, project.name, `${input.origin}|${project.id}`, index === 0 ? "primary" : undefined));
   if (input.more) buttons.push(button(ACTION.newThread, "Other…", input.origin));
-  return {
-    text: "Which project should this thread run in?",
-    blocks: [
-      section("Which project should this run in?"),
-      { type: "actions", elements: buttons.slice(0, 25) },
-      context("Set a default project in Slackoff's settings to skip this."),
-    ],
-  };
+  const blocks: KnownBlock[] = [section("Which project should this run in?")];
+  const sections = sectionSelect(ACTION.pickSection, input.sections, input.sectionId);
+  // Pick the sidebar section first; tapping a project starts the thread.
+  if (sections) blocks.push({ type: "actions", block_id: `origin:${input.origin}`, elements: [sections] });
+  blocks.push({ type: "actions", elements: buttons.slice(0, 25) });
+  blocks.push(context("Set a default project in Slackoff's settings to skip this."));
+  return { text: "Which project should this thread run in?", blocks };
+}
+
+/** "Section" picker over BB's sidebar sections, with a "No section" choice. */
+export function sectionSelect(actionId: string, sections: readonly { id: string; name: string }[], current: string | null) {
+  if (sections.length === 0) return undefined;
+  return select(actionId, "Section", [option("No section", NO_SECTION), ...sections.map((candidate) => option(candidate.name, candidate.id))], current ?? NO_SECTION);
 }
 
 export function buildNewThreadModal(input: {
   projects: readonly { id: string; name: string }[];
   projectId: string | undefined;
+  sections?: readonly { id: string; name: string }[];
+  sectionId?: string | null;
   prompt?: string;
   /** "channel|ts" of the DM to thread under, when started from a message. */
   origin?: string;
@@ -93,6 +111,7 @@ export function buildNewThreadModal(input: {
           ...(initial ? { initial_option: initial } : {}),
         },
       },
+      ...sectionInput(input.sections ?? [], input.sectionId ?? null),
       {
         type: "input",
         block_id: NEW_THREAD_FIELDS.promptBlock,
@@ -106,6 +125,12 @@ export function buildNewThreadModal(input: {
       },
     ],
   };
+}
+
+function sectionInput(sections: readonly { id: string; name: string }[], current: string | null): KnownBlock[] {
+  const element = sectionSelect(NEW_THREAD_FIELDS.sectionInput, sections, current);
+  if (!element) return [];
+  return [{ type: "input", block_id: NEW_THREAD_FIELDS.sectionBlock, label: plain("Sidebar section"), optional: true, element }];
 }
 
 export function buildMirrorModal(threads: readonly { id: string; title: string; projectName: string }[]): ModalView {

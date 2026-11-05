@@ -5,6 +5,7 @@ import type { Log } from "./slack/outbox.ts";
 
 const MODEL_CACHE_MS = 10 * 60_000;
 const PROJECT_CACHE_MS = 10 * 60_000;
+const SECTION_CACHE_MS = 60_000;
 
 export interface ProjectInfo {
   name: string;
@@ -17,6 +18,7 @@ export class Catalog {
   readonly #now: () => number;
   readonly #projects = new Map<string, { at: number; value: ProjectInfo }>();
   readonly #models = new Map<string, { at: number; models: ModelCatalogEntry[] }>();
+  #sections: { at: number; value: { id: string; name: string }[] } | undefined;
 
   constructor(sdk: Sdk, log: Log, now: () => number) {
     this.#sdk = sdk;
@@ -52,6 +54,20 @@ export class Catalog {
     } catch (error) {
       this.#log.warn(`could not load models for ${thread.providerId}: ${errorText(error)}`);
       return cached?.models ?? [];
+    }
+  }
+
+  /** BB sidebar sections, cached briefly. */
+  async sections(): Promise<{ id: string; name: string }[]> {
+    if (this.#sections && this.#now() - this.#sections.at < SECTION_CACHE_MS) return this.#sections.value;
+    try {
+      const sections = await this.#sdk.threadSections.list();
+      const value = sections.map((section) => ({ id: section.id, name: section.name }));
+      this.#sections = { at: this.#now(), value };
+      return value;
+    } catch (error) {
+      this.#log.warn(`could not load sidebar sections: ${errorText(error)}`);
+      return this.#sections?.value ?? [];
     }
   }
 

@@ -276,7 +276,7 @@ test("a top-level DM with no known project offers one-tap project buttons", asyn
   const chooser = slack.posts()[0]!;
   assert.equal(chooser.body.channel, DM);
   assert.equal(chooser.body.thread_ts, "200.000");
-  const buttons = (chooser.body.blocks as { type: string; elements?: { text: { text: string }; value: string; action_id: string }[] }[]).find((block) => block.type === "actions")!.elements!;
+  const buttons = (chooser.body.blocks as { type: string; elements?: { text: { text: string }; value: string; action_id: string }[] }[]).filter((block) => block.type === "actions").at(-1)!.elements!;
   assert.deepEqual(
     buttons.map((button) => button.text.text),
     ["beta", "alpha"],
@@ -454,4 +454,57 @@ test("Slack messages reach the agent in the order they were sent", async () => {
   await settle();
   const sends = harness.callsTo("threads.send").map((call) => (call[0] as { input: { type: string }[] }).input[0]?.type);
   assert.deepEqual(sends, ["localImage", "text"]);
+});
+
+test("App Home rows open the Slack thread view", async () => {
+  const { bridge, slack, settle } = setup();
+  await bridge.enable(THREAD);
+  bridge.handleEnvelope({ type: "events_api", envelope_id: "e", payload: { event_id: "home1", event: { type: "app_home_opened", tab: "home", user: USER } } });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  await settle();
+  const view = slack.of("views.publish").at(-1)?.body.view as { blocks: { accessory?: { url?: string; text: { text: string } } }[] };
+  const row = view.blocks.find((block) => block.accessory?.url);
+  const cardTs = slack.posts()[0]?.ts;
+  assert.equal(row?.accessory?.text.text, "Open");
+  assert.equal(row?.accessory?.url, `https://slack.test/${cardTs}?thread_ts=${cardTs}&cid=${DM}`);
+});
+
+test("a DM thread can be put in a sidebar section before it starts", async () => {
+  const { bridge, slack, harness, store, settle } = setup();
+  harness.stub("projects.list", async () => [
+    { id: "proj_a", name: "alpha", kind: "standard" },
+    { id: "proj_b", name: "beta", kind: "standard" },
+  ]);
+  bridge.handleEnvelope(message("Review the PR"));
+  await settle();
+  const blocks = slack.posts()[0]?.body.blocks as { type: string; block_id?: string; elements?: { action_id: string; value?: string; options?: { value: string }[] }[] }[];
+  const sectionRow = blocks.find((block) => block.block_id?.startsWith("origin:"))!;
+  assert.deepEqual(
+    sectionRow.elements![0]!.options!.map((choice) => choice.value),
+    ["none", "sec_reviews", "sec_misc"],
+  );
+  bridge.handleEnvelope(action(ACTION.pickSection, "", { block_id: sectionRow.block_id, selected_option: { value: "sec_reviews" } }));
+  const projectButton = blocks.filter((block) => block.type === "actions").at(-1)!.elements![0]!;
+  bridge.handleEnvelope(action(projectButton.action_id, projectButton.value ?? ""));
+  await settle();
+  assert.equal((harness.callsTo("threads.spawn")[0]?.[0] as { sectionId?: string }).sectionId, "sec_reviews");
+  assert.equal(await store.lastSectionId(), "sec_reviews");
+
+  // The next DM in a known project reuses the section without asking.
+  bridge.handleEnvelope(message("Another one", { ts: "300.000" }));
+  await settle();
+  assert.equal((harness.callsTo("threads.spawn")[1]?.[0] as { sectionId?: string }).sectionId, "sec_reviews");
+});
+
+test("the status card moves a thread between sidebar sections", async () => {
+  const { bridge, slack, harness, store, settle } = setup();
+  await bridge.enable(THREAD);
+  assert.match(json(slack.posts()[0]?.body.blocks), /slackoff_section/);
+  bridge.handleEnvelope(action(ACTION.section, "", { block_id: `ctl:${THREAD}`, selected_option: { value: "sec_misc" } }));
+  await settle();
+  assert.deepEqual(harness.callsTo("threads.update")[0]?.[0], { threadId: THREAD, sectionId: "sec_misc" });
+  assert.equal(await store.lastSectionId(), "sec_misc");
+  bridge.handleEnvelope(action(ACTION.section, "", { block_id: `ctl:${THREAD}`, selected_option: { value: "none" } }));
+  await settle();
+  assert.deepEqual(harness.callsTo("threads.update")[1]?.[0], { threadId: THREAD, sectionId: null });
 });

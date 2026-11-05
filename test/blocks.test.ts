@@ -17,6 +17,8 @@ const base: ThreadCardState = {
   effort: "high",
   models: Array.from({ length: 150 }, (_, index) => ({ id: `m${index % 120}`, name: `Model ${index}` })),
   efforts: ["low", "high"],
+  sections: Array.from({ length: 120 }, (_, index) => ({ id: `sec_${index}`, name: `Section ${index}` })),
+  sectionId: "sec_3",
   progress: {
     startedAt: 0,
     now: 75_000,

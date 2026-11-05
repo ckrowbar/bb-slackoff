@@ -9,7 +9,7 @@ import { markdownToSlackMessages } from "../format/markdown.ts";
 import { escapeMrkdwn, truncate } from "../format/mrkdwn.ts";
 import type { ActionElement, KnownBlock, Option, SlackMessage } from "../slack/types.ts";
 import type { PlanStep, Step, TurnStatus } from "../turn.ts";
-import { ACTION, MORE, STATUS_EMOJI, button, context, isLive, option, plain, section, select, statusText, type CardStatus } from "./common.ts";
+import { ACTION, MORE, NO_SECTION, STATUS_EMOJI, button, context, isLive, option, plain, section, select, statusText, type CardStatus } from "./common.ts";
 
 export interface ModelChoice {
   id: string;
@@ -42,6 +42,9 @@ export interface ThreadCardState {
   effort?: string | undefined;
   models: readonly ModelChoice[];
   efforts: readonly string[];
+  /** BB sidebar sections the thread can move to, and the one it is in. */
+  sections: readonly { id: string; name: string }[];
+  sectionId: string | null;
   /** Live progress while a turn runs. */
   progress?: Progress | undefined;
   /** Summary of the last finished turn. */
@@ -71,7 +74,8 @@ export function buildThreadCard(state: ThreadCardState): SlackMessage {
   }
 
   const progress = isLive(state.status) ? state.progress : undefined;
-  const details = [state.projectName, state.model?.name, state.effort].filter(Boolean).map((part) => escapeMrkdwn(String(part)));
+  const sectionName = state.sections.find((candidate) => candidate.id === state.sectionId)?.name;
+  const details = [state.projectName, sectionName, state.model?.name, state.effort].filter(Boolean).map((part) => escapeMrkdwn(String(part)));
   if (progress) details.push(progressSummary(progress.now - progress.startedAt, progress.steps.length));
   else if (state.lastTurn && (state.status === "done" || state.status === "error" || state.status === "idle")) {
     details.push(progressSummary(state.lastTurn.durationMs, state.lastTurn.steps));
@@ -103,6 +107,15 @@ export function buildThreadCard(state: ThreadCardState): SlackMessage {
     if (models) elements.push(models);
     const efforts = select(ACTION.effort, "Effort", state.efforts.map((level) => option(level, level)), state.effort);
     if (efforts) elements.push(efforts);
+    if (state.sections.length > 0) {
+      const sections = select(
+        ACTION.section,
+        "Section",
+        [option("No section", NO_SECTION), ...state.sections.map((candidate) => option(candidate.name, candidate.id))],
+        state.sectionId ?? NO_SECTION,
+      );
+      if (sections) elements.push(sections);
+    }
   }
   const more: Option[] = [
     state.appLink ? { ...option("Open in BB", MORE.open), url: state.appLink } : option("Show in BB", MORE.open),
